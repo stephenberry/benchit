@@ -108,8 +108,8 @@ The group header carries the declared amount only when every case agrees on it; 
   --time MS             per-benchmark budget in ms (default 1000)
   --block N             samples per visit when interleaving (default 1)
   --no-interleave       run each case to completion instead of in rounds
-  --save-baseline NAME  write target/benchit/NAME.tsv
-  --baseline NAME       load target/benchit/NAME.tsv and show a delta column
+  --save-baseline NAME  write benchit/NAME.tsv beside the built binary
+  --baseline NAME       load benchit/NAME.tsv from there, show a delta column
   --format=text|tsv     output format (default text)
   --list                list matching benchmarks without running them
   -h, --help            this message
@@ -119,9 +119,27 @@ The group header carries the declared amount only when every case agrees on it; 
 
 Interleaving has one real cost: with large working sets, each round evicts the previous case's data, so every sample is cold-cache. That is consistent across the group and arguably the more honest number, but for a benchmark deliberately measuring hot-cache behaviour it is wrong. Use `--block N` to take N samples per visit, or `--no-interleave` for one-case-at-a-time ordering.
 
+## Reading the numbers back
+
+`Group::finish` returns the `GroupResult` it just printed, so a benchmark that needs a metric this crate has no opinion about computes it from the samples instead of parsing `--format=tsv` back out of a pipe:
+
+```rust
+let result = group.finish();
+for case in &result.cases {
+    let cpu_seconds = case.stats.min * 1e-9;
+    eprintln!("{}: {:.1}x realtime", case.name, SECONDS_PER_BUFFER / cpu_seconds);
+}
+```
+
+Every case carries its `samples` in round order, its `stats` (`min`, `p50`, `p90`), its `ratio` against the group's reference, and its `baseline` if one was loaded. Round order is the part worth knowing: index `i` of one case was measured in the same round as index `i` of every other, so a derived metric can be paired the same way the ratio is. Print to stderr, as above, if the run might be asked for `--format=tsv`.
+
+A group filtered out by the command line, or a run under `--list`, returns a result with no cases rather than nothing at all. Check for that if you gate on the numbers: "nothing was measured" and "nothing measured badly" are the same empty list, so a mistyped filter would otherwise turn a failing gate green.
+
 ## Baselines
 
-`--save-baseline main` writes `target/benchit/main.tsv`; `--baseline main` loads it and adds a delta column against the saved minimum. The format is TSV, sorted by group then case, so it diffs cleanly in git and is readable without a tool.
+`--save-baseline main` writes `benchit/main.tsv` into the directory cargo built the bench binary into; `--baseline main` loads it and adds a delta column against the saved minimum. The format is TSV, sorted by group then case, so it diffs cleanly in git and is readable without a tool.
+
+That directory is found from the binary's own path, so `build.target-dir` in `.cargo/config.toml`, a `--target-dir` flag, and a workspace all resolve correctly, and each build keeps its own baselines: a debug binary run straight out of `target/debug/deps/` cannot overwrite what `cargo bench` saved, and a `--target` build keeps a separate file. `CARGO_TARGET_DIR` is a fallback for layouts that are not cargo-shaped.
 
 Saving merges: cases measured by this run replace their existing rows, and rows the run did not measure are carried across untouched. So saving from a filtered run updates just those cases instead of discarding every baseline the filter excluded.
 
@@ -144,6 +162,8 @@ Cross-run comparison is inherently weaker than within-run pairing, because nothi
 The positional filter is a substring match on `group/case`, as in criterion, so existing muscle memory and CI invocations transfer unchanged.
 
 Expect one number to move on the way across: any benchmark that allocates inside its timed closure will get faster when converted to `iter_with`, because it stops counting a deallocation it was never meant to measure. That is a correction, not a regression.
+
+One thing does not transfer. Cases are registered, not run: an interleaved schedule cannot exist until the group has seen all of them, so every closure in a group is live at once. Two cases that each capture `&mut scratch` will not compile. Share it through a `RefCell` and borrow outside the `iter` call, or give each case its own.
 
 ## Out of scope
 

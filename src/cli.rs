@@ -48,9 +48,11 @@ pub struct Config {
     /// time. This is the point of the harness; turn it off only when a
     /// hot-cache number is the one you want.
     pub interleave: bool,
-    /// Write results to `target/benchit/<name>.tsv`.
+    /// Write results to `benchit/<name>.tsv` in the directory cargo built this
+    /// binary into, so a debug and a release run keep separate baselines.
     pub save_baseline: Option<String>,
-    /// Load `target/benchit/<name>.tsv` and add a delta column.
+    /// Load `benchit/<name>.tsv` from that same directory and add a delta
+    /// column.
     pub baseline: Option<String>,
     /// Output format.
     pub format: Format,
@@ -229,8 +231,8 @@ usage: <bench binary> [FILTER] [OPTIONS]
   --time MS             per-benchmark budget in ms (default 1000)
   --block N             samples per visit when interleaving (default 1)
   --no-interleave       run each case to completion instead of in rounds
-  --save-baseline NAME  write target/benchit/NAME.tsv
-  --baseline NAME       load target/benchit/NAME.tsv and show a delta column
+  --save-baseline NAME  write benchit/NAME.tsv beside the built binary
+  --baseline NAME       load benchit/NAME.tsv from there, show a delta column
   --format=text|tsv     output format (default text)
   --list                list matching benchmarks without running them
   -h, --help            this message

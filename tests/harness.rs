@@ -417,3 +417,95 @@ fn iter_with_excludes_setup_from_the_timed_span() {
         "setup must fall outside the timed span:\n{report}"
     );
 }
+
+#[test]
+fn finish_hands_back_the_numbers_it_printed() {
+    let capture = Capture::default();
+    let result = {
+        let mut bench = Bench::with_config(fast(Format::Tsv)).report_to(Box::new(capture.clone()));
+        let mut g = bench.group("g");
+        g.throughput(Throughput::Elements(100));
+        g.bench("cheap", |b| b.iter(|| work(std::hint::black_box(50))));
+        g.bench("dear", |b| b.iter(|| work(std::hint::black_box(400))));
+        g.finish()
+    };
+
+    assert_eq!(result.name, "g");
+    let names: Vec<&str> = result.cases.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["cheap", "dear"]);
+
+    let find = |name: &str| {
+        result
+            .cases
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no case {name}"))
+    };
+
+    let cheap = find("cheap");
+    assert!(cheap.is_reference);
+    assert_eq!(cheap.ratio, None, "the reference has nothing to compare to");
+    assert_eq!(cheap.samples.len(), 12);
+    assert_eq!(cheap.throughput, Some(Throughput::Elements(100)));
+    // A rate times the time one iteration took is the amount it declared.
+    let per_iteration = cheap.rate().expect("declared a throughput") * cheap.stats.min * 1e-9;
+    assert!((per_iteration - 100.0).abs() < 1e-9, "{per_iteration}");
+    assert_eq!(cheap.delta(), None, "no baseline was loaded");
+
+    let dear = find("dear");
+    assert!(!dear.is_reference);
+    assert!(dear.ratio.expect("a ratio against the reference").point > 1.0);
+
+    // The same numbers reached the report, rather than the result carrying one
+    // set and the printed table another.
+    let report = capture.text();
+    for c in &result.cases {
+        assert!(
+            report.contains(&format!("{:.3}", c.stats.min)),
+            "{} is missing from:\n{report}",
+            c.name
+        );
+    }
+}
+
+#[test]
+fn a_group_that_measures_nothing_still_hands_back_a_result() {
+    for config in [
+        Config {
+            filter: Some("no-such-case".to_string()),
+            ..fast(Format::Text)
+        },
+        Config {
+            list: true,
+            ..fast(Format::Text)
+        },
+    ] {
+        let capture = Capture::default();
+        let result = {
+            let mut bench = Bench::with_config(config).report_to(Box::new(capture.clone()));
+            let mut g = bench.group("g");
+            g.bench("a", |b| b.iter(|| work(std::hint::black_box(50))));
+            g.finish()
+        };
+        assert_eq!(result.name, "g");
+        assert!(result.cases.is_empty(), "{} cases", result.cases.len());
+        assert_eq!(capture.text(), "", "nothing should have been measured");
+    }
+}
+
+#[test]
+fn finish_does_not_run_the_schedule_twice() {
+    let capture = Capture::default();
+    let result = {
+        let mut bench = Bench::with_config(fast(Format::Tsv)).report_to(Box::new(capture.clone()));
+        let mut g = bench.group("g");
+        g.bench("a", |b| b.iter(|| work(std::hint::black_box(50))));
+        // `g` is dropped at the end of this block, and must not measure again.
+        g.finish()
+    };
+    assert_eq!(result.cases.len(), 1);
+
+    let report = capture.text();
+    let rows = report.lines().filter(|l| l.starts_with("g\t")).count();
+    assert_eq!(rows, 1, "the group was reported twice:\n{report}");
+}

@@ -11,48 +11,63 @@ use crate::baseline::Row;
 use crate::cli::Config;
 use crate::stats::{Ratio, Stats};
 
-/// One measured case.
-pub(crate) struct CaseResult {
+/// One measured case, as handed back by [`Group::finish`](crate::Group::finish).
+///
+/// Everything the report prints is derived from these fields.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct CaseResult {
+    /// The case name, without the group prefix.
     pub name: String,
     /// Iterations per sample, as calibrated.
     pub iters: u64,
     /// Per-iteration nanoseconds, one entry per sample, in round order.
+    ///
+    /// Round order is load-bearing: index `i` here was measured in the same
+    /// round as index `i` of every other case in the group, which is what makes
+    /// the two comparable pair by pair.
     pub samples: Vec<f64>,
+    /// Order statistics over [`samples`](Self::samples), in nanoseconds per
+    /// iteration.
     pub stats: Stats,
     /// The group's reference case: the first one that passed the filter.
     pub is_reference: bool,
+    /// This case's cost relative to the reference case.
+    ///
     /// `None` for the reference case, and for a case whose ratio could not be
     /// computed because the reference measured as zero.
     pub ratio: Option<Ratio>,
-    /// The matching row from `--baseline`, if there was one.
-    pub baseline: Option<Row>,
+    /// What `--baseline` had recorded for this case, if anything.
+    pub baseline: Option<Stats>,
     /// What this case declared it processes per iteration.
     pub throughput: Option<Throughput>,
 }
 
 impl CaseResult {
-    /// Items per second, if this case declared a throughput.
-    fn rate(&self) -> Option<(f64, Throughput)> {
-        let t = self.throughput?;
-        let amount = match t {
-            Throughput::Bytes(n) | Throughput::Elements(n) => n as f64,
-        };
+    /// Items per second, if this case declared a
+    /// [`Throughput`](crate::Throughput).
+    ///
+    /// The unit is whatever the declaration counted; pair it with
+    /// [`throughput`](Self::throughput) to know which.
+    pub fn rate(&self) -> Option<f64> {
+        let amount = self.throughput?.amount() as f64;
         if self.stats.min <= 0.0 {
             return None;
         }
-        Some((amount / (self.stats.min * 1e-9), t))
+        Some(amount / (self.stats.min * 1e-9))
     }
 
-    /// Change in min against the loaded baseline, as a fraction.
-    fn delta(&self) -> Option<f64> {
-        let base = self.baseline.as_ref()?.min_ns;
+    /// Change in min against the loaded baseline, as a fraction: `0.04` is 4%
+    /// slower than the baseline, `-0.04` is 4% faster.
+    pub fn delta(&self) -> Option<f64> {
+        let base = self.baseline?.min;
         if base <= 0.0 {
             return None;
         }
         Some((self.stats.min - base) / base)
     }
 
-    pub fn to_row(&self, group: &str) -> Row {
+    pub(crate) fn to_row(&self, group: &str) -> Row {
         Row {
             group: group.to_string(),
             case: self.name.clone(),
@@ -65,12 +80,19 @@ impl CaseResult {
     }
 }
 
-/// One measured group.
-pub(crate) struct GroupResult {
+/// One measured group, as returned by [`Group::finish`](crate::Group::finish).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct GroupResult {
+    /// The group name, which prefixes every case's full name.
     pub name: String,
-    /// The amount for the group header: set only when every case agrees.
-    pub throughput: Option<Throughput>,
+    /// The measured cases, in registration order. The first is the reference.
+    /// Empty if the group did not run; see [`Group::finish`](crate::Group::finish).
     pub cases: Vec<CaseResult>,
+    /// The amount for the text header, set only when every case agrees. A
+    /// formatting detail rather than a result: per-case amounts are on
+    /// [`CaseResult::throughput`].
+    pub(crate) throughput: Option<Throughput>,
 }
 
 /// Where results go.
@@ -304,7 +326,11 @@ impl Cells {
             min: time(c.stats.min),
             p50: time(c.stats.p50),
             p90: time(c.stats.p90),
-            rate: c.rate().map(|(v, t)| rate(v, t)).unwrap_or_default(),
+            rate: c
+                .rate()
+                .zip(c.throughput)
+                .map(|(v, t)| rate(v, t))
+                .unwrap_or_default(),
             ratio: match (&c.ratio, c.is_reference) {
                 (Some(r), _) => ratio(r.point),
                 (None, true) => "1.00x".to_string(),
@@ -425,11 +451,8 @@ impl Reporter for TsvReporter {
                 point,
                 lo,
                 hi,
-                c.rate().map(|(v, _)| num(v)).unwrap_or_default(),
-                c.baseline
-                    .as_ref()
-                    .map(|b| num(b.min_ns))
-                    .unwrap_or_default(),
+                c.rate().map(num).unwrap_or_default(),
+                c.baseline.map(|b| num(b.min)).unwrap_or_default(),
             );
         }
         let _ = self.out.flush();

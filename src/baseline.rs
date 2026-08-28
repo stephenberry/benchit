@@ -29,7 +29,7 @@ pub(crate) type Baseline = HashMap<String, Row>;
 
 const HEADER: &str = "group\tcase\titers\tmin_ns\tp50_ns\tp90_ns\tsamples";
 
-/// `target/benchit/<name>.tsv`, honouring `CARGO_TARGET_DIR`.
+/// `<build-dir>/benchit/<name>.tsv`.
 pub(crate) fn path(name: &str) -> io::Result<PathBuf> {
     if name.is_empty() || name.contains(['/', '\\']) || name == ".." {
         return Err(io::Error::new(
@@ -37,10 +37,43 @@ pub(crate) fn path(name: &str) -> io::Result<PathBuf> {
             format!("`{name}` is not a usable baseline name"),
         ));
     }
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("target"));
-    Ok(target.join("benchit").join(format!("{name}.tsv")))
+    Ok(dir().join("benchit").join(format!("{name}.tsv")))
+}
+
+/// Where to keep baselines: beside the build they describe.
+///
+/// A literal `target` relative to the working directory is only right by
+/// coincidence, since it misses `build.target-dir`, misses `--target-dir`, and
+/// in a workspace names the member directory rather than the root cargo built
+/// into. `CARGO_TARGET_DIR` covers only the first of those, and cargo resolves
+/// a relative value against its own invocation directory rather than the bench
+/// binary's, so it is a fallback rather than the answer.
+fn dir() -> PathBuf {
+    build_dir(&std::env::current_exe().unwrap_or_default())
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("target"))
+}
+
+/// The directory cargo built `exe` into, from the shape of its path.
+///
+/// Cargo runs a bench binary out of `<target-dir>/[<triple>/]<profile>/deps/`,
+/// so the directory holding `deps` is the build. Using it rather than the
+/// target directory above it keeps each build's baselines to itself: a debug
+/// binary run straight from `target/debug/deps/` cannot overwrite the numbers
+/// `cargo bench` saved, and a `--target` build keeps its own file. Both would
+/// otherwise share one, and a debug timing saved over a release baseline is
+/// worse than no baseline at all.
+///
+/// Anything not cargo-shaped returns `None` rather than a guess.
+fn build_dir(exe: &Path) -> Option<&Path> {
+    let deps = exe.parent()?;
+    if deps.file_name()? != "deps" {
+        return None;
+    }
+    // A relative `deps/x` leaves an empty parent, which would silently mean the
+    // working directory.
+    deps.parent().filter(|p| !p.as_os_str().is_empty())
 }
 
 /// Write `rows` sorted by group then case, so the file diffs cleanly.
@@ -224,5 +257,51 @@ mod tests {
         assert!(path("").is_err());
         let p = path("main").expect("valid name");
         assert!(p.ends_with("benchit/main.tsv"), "{}", p.display());
+    }
+
+    #[test]
+    fn the_build_directory_is_read_off_the_binarys_path() {
+        let of = |p: &str| build_dir(Path::new(p)).map(|d| d.to_string_lossy().into_owned());
+        // The profile directory, not the target directory above it: debug and
+        // release must not share a baseline file.
+        assert_eq!(
+            of("/w/target/release/deps/demo-1"),
+            Some("/w/target/release".into())
+        );
+        assert_eq!(
+            of("/w/target/debug/deps/demo-1"),
+            Some("/w/target/debug".into())
+        );
+        // A renamed target directory is found the same way.
+        assert_eq!(
+            of("/w/target.noindex/release/deps/demo-1"),
+            Some("/w/target.noindex/release".into())
+        );
+        // Cross-compiled builds keep their own, since the triple sits above the
+        // profile directory.
+        assert_eq!(
+            of("/w/t/aarch64-apple-darwin/release/deps/demo-1"),
+            Some("/w/t/aarch64-apple-darwin/release".into())
+        );
+        // Not a cargo layout: an installed or copied binary, and a bare name.
+        assert_eq!(of("/usr/local/bin/demo"), None);
+        assert_eq!(of("demo"), None);
+        // Relative, with nothing above `deps`: an empty parent would silently
+        // mean the working directory.
+        assert_eq!(of("deps/demo"), None);
+    }
+
+    #[test]
+    fn this_test_binary_resolves_to_the_directory_cargo_built_it_into() {
+        // The derivation above is arithmetic on a string; this is the check
+        // that cargo really does lay binaries out that way.
+        let exe = std::env::current_exe().expect("a current exe");
+        let build = build_dir(&exe).expect("a cargo-shaped layout");
+        assert_eq!(Some(build), exe.parent().and_then(Path::parent));
+        assert_eq!(
+            exe.parent().and_then(Path::file_name),
+            Some("deps".as_ref())
+        );
+        assert!(build.join("deps").is_dir(), "{}", build.display());
     }
 }

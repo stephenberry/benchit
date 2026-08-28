@@ -32,10 +32,18 @@ pub(crate) fn sorted_copy(samples: &[f64]) -> Vec<f64> {
 /// The minimum leads because noise on deterministic CPU-bound code is one-sided;
 /// the median and p90 sit beside it because that assumption does not always
 /// hold, and the spread between them is what tells the two cases apart.
+///
+/// Marked `#[non_exhaustive]` because which order statistics are reported is a
+/// judgement that may grow a fourth entry; consumers read these fields rather
+/// than construct them.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Stats {
+#[non_exhaustive]
+pub struct Stats {
+    /// The fastest sample, and the headline number.
     pub min: f64,
+    /// The median sample.
     pub p50: f64,
+    /// The 90th percentile sample.
     pub p90: f64,
 }
 
@@ -43,7 +51,7 @@ impl Stats {
     /// # Panics
     ///
     /// Panics if `samples` is empty.
-    pub fn from_sorted(sorted: &[f64]) -> Self {
+    pub(crate) fn from_sorted(sorted: &[f64]) -> Self {
         Self {
             min: sorted[0],
             p50: quantile(sorted, 0.50),
@@ -54,7 +62,8 @@ impl Stats {
 
 /// A case's cost relative to the group's reference case.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Ratio {
+#[non_exhaustive]
+pub struct Ratio {
     /// The reported ratio: the median of the per-round paired ratios when the
     /// group was interleaved, and `case.min / reference.min` otherwise.
     pub point: f64,

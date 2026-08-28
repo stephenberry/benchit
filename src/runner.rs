@@ -43,10 +43,17 @@ impl Plan<'_, '_> {
     }
 }
 
-pub(crate) fn run(bench: &mut Bench, group_name: &str, cases: &mut [Case<'_>]) {
+pub(crate) fn run(bench: &mut Bench, group_name: &str, cases: &mut [Case<'_>]) -> GroupResult {
+    // A group that measured nothing still returns a result; see `Group::finish`.
+    let nothing = || GroupResult {
+        name: group_name.to_string(),
+        throughput: None,
+        cases: Vec::new(),
+    };
+
     let matches = |case: &Case<'_>| bench.config.matches(&full_name(group_name, &case.name));
     if !cases.iter().any(matches) {
-        return;
+        return nothing();
     }
 
     if bench.config.list {
@@ -54,7 +61,7 @@ pub(crate) fn run(bench: &mut Bench, group_name: &str, cases: &mut [Case<'_>]) {
         for case in cases.iter().filter(|c| matches(c)) {
             let _ = writeln!(out, "{}", full_name(group_name, &case.name));
         }
-        return;
+        return nothing();
     }
 
     bench.begin_run();
@@ -97,6 +104,7 @@ pub(crate) fn run(bench: &mut Bench, group_name: &str, cases: &mut [Case<'_>]) {
         bench.record(&result);
     }
     bench.reporter.group(&result);
+    result
 }
 
 fn full_name(group: &str, case: &str) -> String {
@@ -188,7 +196,7 @@ fn summarize(bench: &Bench, group_name: &str, plans: Vec<Plan<'_, '_>>) -> Group
                 .flatten();
             let name = std::mem::take(&mut plan.case.name);
             CaseResult {
-                baseline: bench.saved_row(&plan.full_name),
+                baseline: bench.saved_stats(&plan.full_name),
                 is_reference: i == 0,
                 throughput: plan.case.throughput,
                 name,

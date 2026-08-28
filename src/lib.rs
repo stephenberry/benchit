@@ -74,13 +74,20 @@
 //! --time MS             per-benchmark budget in ms (default 1000)
 //! --block N             samples per visit when interleaving (default 1)
 //! --no-interleave       run each case to completion instead of in rounds
-//! --save-baseline NAME  write target/benchit/NAME.tsv
-//! --baseline NAME       load target/benchit/NAME.tsv and show a delta column
+//! --save-baseline NAME  write benchit/NAME.tsv beside the built binary
+//! --baseline NAME       load benchit/NAME.tsv from there, show a delta column
 //! --format=text|tsv     output format (default text)
 //! --list                list matching benchmarks without running them
 //! ```
 //!
 //! The full text is in [`USAGE`].
+//!
+//! # Reading the numbers back
+//!
+//! [`Group::finish`] returns the [`GroupResult`] it just printed, so a
+//! benchmark that needs a metric this crate has no opinion about (cost per
+//! audio second, fraction of a core, cycles per byte) computes it from the
+//! samples rather than parsing `--format=tsv` back out of a pipe.
 //!
 //! # What it does not do
 //!
@@ -101,19 +108,33 @@ mod stats;
 
 pub use bencher::Bencher;
 pub use cli::{ArgError, Config, Format, USAGE};
+pub use report::{CaseResult, GroupResult};
+pub use stats::{Ratio, Stats};
 
 use std::fmt::Display;
 
-use report::{GroupResult, Reporter, TextReporter, TsvReporter};
+use report::{Reporter, TextReporter, TsvReporter};
 use runner::Case;
 
 /// What a benchmark processes per iteration, so the reporter can print a rate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Throughput {
     /// Bytes per iteration; reported in binary units.
     Bytes(u64),
     /// Elements per iteration; reported in SI units.
     Elements(u64),
+}
+
+impl Throughput {
+    /// How much one iteration processes, whatever the unit. Reading the count
+    /// through this rather than by matching keeps a new variant from breaking
+    /// the caller.
+    pub fn amount(self) -> u64 {
+        match self {
+            Throughput::Bytes(n) | Throughput::Elements(n) => n,
+        }
+    }
 }
 
 /// A benchmark run: configuration, the loaded baseline, and the reporter.
@@ -230,8 +251,16 @@ impl Bench {
             .header(&self.config, timer_ns, self.iter_with_floor_ns);
     }
 
-    fn saved_row(&self, full_name: &str) -> Option<baseline::Row> {
-        self.loaded.get(full_name).cloned()
+    /// What the loaded baseline recorded for a case. The saved row's iteration
+    /// and sample counts describe how that number was obtained rather than what
+    /// it was, and nothing reports them.
+    fn saved_stats(&self, full_name: &str) -> Option<Stats> {
+        let row = self.loaded.get(full_name)?;
+        Some(Stats {
+            min: row.min_ns,
+            p50: row.p50_ns,
+            p90: row.p90_ns,
+        })
     }
 
     fn record(&mut self, group: &GroupResult) {
@@ -309,6 +338,28 @@ impl<'b> Group<'b> {
     /// Ratios are relative to the first case registered (more precisely, the
     /// first that passes the filter), which is conventionally the reference
     /// implementation.
+    ///
+    /// # Sharing a scratch buffer between cases
+    ///
+    /// Every case in a group is live at once, because an interleaved schedule
+    /// cannot exist until all of them are registered. Two closures that each
+    /// capture `&mut scratch` therefore do not compile, which is the one thing
+    /// that catches people converting from a harness that runs each case as it
+    /// is declared. Share it through a [`RefCell`](std::cell::RefCell) instead:
+    ///
+    /// ```no_run
+    /// # use benchit::Bench;
+    /// use std::cell::RefCell;
+    ///
+    /// # let mut bench = Bench::from_args();
+    /// let scratch = RefCell::new(vec![0u64; 4096]);
+    /// let mut group = bench.group("solve");
+    /// group.bench("naive", |b| b.iter(|| scratch.borrow_mut()[0] += 1));
+    /// group.bench("tuned", |b| b.iter(|| scratch.borrow_mut()[1] += 2));
+    /// ```
+    ///
+    /// Borrow outside the [`iter`](Bencher::iter) call rather than inside it if
+    /// the operation is small enough for a borrow-flag check to register.
     pub fn bench(&mut self, name: impl Display, f: impl FnMut(&mut Bencher) + 'b) -> &mut Self {
         self.cases.push(Case {
             name: name.to_string(),
@@ -318,8 +369,41 @@ impl<'b> Group<'b> {
         self
     }
 
-    /// Run the group now. Punctuation only: dropping it does the same thing.
-    pub fn finish(self) {}
+    /// Run the group now and hand back what it measured.
+    ///
+    /// Dropping the group runs it too, so calling this is only necessary when
+    /// you want the numbers. Everything the report prints is in the
+    /// [`GroupResult`], which is how a benchmark computes a metric the harness
+    /// has no business knowing about:
+    ///
+    /// ```no_run
+    /// # use benchit::Bench;
+    /// # const SECONDS_PER_BUFFER: f64 = 1024.0 / 48_000.0;
+    /// # let mut bench = Bench::from_args();
+    /// let mut group = bench.group("synth/saw");
+    /// group.bench("scalar", |b| b.iter(|| 1));
+    /// let result = group.finish();
+    ///
+    /// for case in &result.cases {
+    ///     let cpu_seconds = case.stats.min * 1e-9;
+    ///     // On stderr, so `--format=tsv` stays machine-readable.
+    ///     eprintln!("{}: {:.1}x realtime", case.name, SECONDS_PER_BUFFER / cpu_seconds);
+    /// }
+    /// ```
+    ///
+    /// An empty [`cases`](GroupResult::cases) means the group did not run: a
+    /// filter excluded it, or this was `--list`. A benchmark that gates on its
+    /// own results should check for that, since "nothing was measured" and
+    /// "nothing measured badly" are the same empty list.
+    pub fn finish(mut self) -> GroupResult {
+        self.run()
+    }
+
+    /// Takes the cases out, which is also what leaves `Drop` nothing to do.
+    fn run(&mut self) -> GroupResult {
+        let mut cases = std::mem::take(&mut self.cases);
+        runner::run(self.bench, &self.name, &mut cases)
+    }
 }
 
 impl Drop for Group<'_> {
@@ -330,6 +414,6 @@ impl Drop for Group<'_> {
         if self.cases.is_empty() || std::thread::panicking() {
             return;
         }
-        runner::run(self.bench, &self.name, &mut self.cases);
+        self.run();
     }
 }

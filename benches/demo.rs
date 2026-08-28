@@ -111,5 +111,20 @@ fn scaling(bench: &mut Bench) {
             )
         });
     }
-    g.finish();
+
+    // Whether the cost really grows as n log n is a question the table cannot
+    // answer, so the benchmark answers it from the returned result. On stderr,
+    // so `--format=tsv` stays machine-readable.
+    let result = g.finish();
+    for case in &result.cases {
+        let Some(n) = case.throughput.map(|t| t.amount() as f64) else {
+            continue;
+        };
+        eprintln!(
+            "  {:<9} {:>6.3} ns/elem   {:>6.4} ns per n log2 n",
+            case.name,
+            case.stats.min / n,
+            case.stats.min / (n * n.log2()),
+        );
+    }
 }
