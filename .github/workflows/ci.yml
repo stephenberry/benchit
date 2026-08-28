@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a branch makes the run in flight for it irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / ${{ matrix.toolchain }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing is the interesting case, so let the others finish
+      # and report rather than cancelling them.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Both ends of the supported range. `rust-version` in Cargo.toml is the
+        # other half of this promise; they have to move together.
+        toolchain: [stable, "1.96"]
+    steps:
+      - uses: actions/checkout@v7
+
+      # rustup ships on every runner image, so no toolchain action is needed.
+      # There is nothing to cache either: a crate with no dependencies compiles
+      # from scratch faster than a cache round trip.
+      - name: Install Rust ${{ matrix.toolchain }}
+        run: |
+          rustup toolchain install ${{ matrix.toolchain }} --profile minimal --no-self-update
+          rustup default ${{ matrix.toolchain }}
+
+      - name: Test
+        run: cargo test
+
+      - name: Build benches
+        run: cargo build --benches
+
+      # The harness reads its own binary's path to decide where baselines live,
+      # and that is the one thing that cannot be checked on a single platform:
+      # `current_exe` resolves symlinks on Linux but not on macOS, and Windows
+      # adds `.exe`. Run a real bench binary and confirm the file lands in the
+      # build directory rather than a relative guess.
+      - name: Baselines land in the build directory
+        if: matrix.toolchain == 'stable'
+        shell: bash
+        run: |
+          cargo bench --bench demo -- --quick --save-baseline ci sum
+          test -f target/release/benchit/ci.tsv
+          cargo bench --bench demo -- --quick --baseline ci sum | tee out.txt
+          grep -q 'base ' out.txt
+
+  lint:
+    name: fmt, clippy, docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal \
+            --component rustfmt,clippy --no-self-update
+          rustup default stable
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps
+
+      # The headline claim, worth enforcing rather than trusting: `cargo tree`
+      # for this crate is one line, itself.
+      - name: No dependencies
+        run: |
+          cargo tree --edges normal
+          test "$(cargo tree --edges normal | wc -l)" -eq 1
