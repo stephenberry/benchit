@@ -223,7 +223,7 @@ fn throughput_is_reported_as_a_rate() {
 #[test]
 fn throughput_applies_to_the_cases_registered_after_it() {
     let capture = Capture::default();
-    {
+    let result = {
         let mut bench = Bench::with_config(fast(Format::Tsv)).report_to(Box::new(capture.clone()));
         let mut g = bench.group("sized");
         for n in [1_024u64, 4_096] {
@@ -232,26 +232,34 @@ fn throughput_applies_to_the_cases_registered_after_it() {
                 b.iter(|| work(std::hint::black_box(100)).wrapping_add(n))
             });
         }
-        g.finish();
-    }
-    let report = capture.text();
-    let per_second = |case: &str| -> f64 {
-        report
-            .lines()
-            .find(|l| l.split('\t').nth(1) == Some(case))
-            .and_then(|l| l.split('\t').nth(10))
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| panic!("no rate for {case} in:\n{report}"))
+        g.finish()
     };
-    // Same body, four times the declared amount: the second case must not
-    // inherit the first one's amount, nor the first the second's.
-    let small = per_second("n=1024");
-    let large = per_second("n=4096");
-    let scale = large / small;
-    assert!(
-        (3.0..5.0).contains(&scale),
-        "each case must use its own declared amount, got {scale}x:\n{report}"
+
+    // Each case keeps the amount declared before it: the second must not
+    // inherit the first one's, nor the first the second's. Asserted on the
+    // declarations rather than on the rates they produce, since the two bodies
+    // are deliberately identical and a ratio of their timings would be a
+    // statement about the machine.
+    let declared: Vec<Option<Throughput>> = result.cases.iter().map(|c| c.throughput).collect();
+    assert_eq!(
+        declared,
+        [
+            Some(Throughput::Bytes(1_024)),
+            Some(Throughput::Bytes(4_096))
+        ]
     );
+
+    // The rate column follows from that: same time, four times the amount.
+    let report = capture.text();
+    for case in &result.cases {
+        let amount = case.throughput.expect("declared").amount() as f64;
+        let rate = case.rate().expect("declared");
+        assert!(
+            (rate * case.stats.min * 1e-9 - amount).abs() < 1e-6,
+            "{} reports {rate}/s for {amount}:\n{report}",
+            case.name
+        );
+    }
 }
 
 #[test]
