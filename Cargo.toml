@@ -1,0 +1,27 @@
+[package]
+name = "benchit"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+description = "A minimal, dependency-free micro-benchmarking harness with interleaved within-run comparison."
+repository = "https://github.com/stephenberry/benchit"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["benchmark", "microbenchmark", "performance", "criterion"]
+categories = ["development-tools::profiling", "development-tools::testing"]
+
+[lib]
+# There are no library benchmarks; without this `cargo bench` runs the unit
+# test binary in bench mode and prints a screenful of "ignored".
+bench = false
+
+[dependencies]
+
+[dev-dependencies]
+
+[[bench]]
+name = "demo"
+harness = false
+
+[profile.bench]
+debug = true
