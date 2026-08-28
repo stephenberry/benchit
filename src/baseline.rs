@@ -55,25 +55,32 @@ fn dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("target"))
 }
 
-/// The directory cargo built `exe` into, from the shape of its path.
+/// The directory cargo built `exe` into: the nearest ancestor holding a `deps`
+/// directory, which is the one unambiguous marker of a cargo build directory.
 ///
-/// Cargo runs a bench binary out of `<target-dir>/[<triple>/]<profile>/deps/`,
-/// so the directory holding `deps` is the build. Using it rather than the
-/// target directory above it keeps each build's baselines to itself: a debug
-/// binary run straight from `target/debug/deps/` cannot overwrite the numbers
+/// Cargo puts a binary in one of three places, all of them within one level of
+/// `<target-dir>/[<triple>/]<profile>/`: bench and test binaries in `deps/`,
+/// examples in `examples/`, and a bin target directly in the profile directory
+/// itself. Matching on `deps` as the exe's own parent would find only the
+/// first, and a `[[bin]]` under `cargo run` would fall through to a relative
+/// guess.
+///
+/// Using the profile directory rather than the target directory above it keeps
+/// each build's baselines to itself: a debug binary cannot overwrite what
 /// `cargo bench` saved, and a `--target` build keeps its own file. Both would
 /// otherwise share one, and a debug timing saved over a release baseline is
 /// worse than no baseline at all.
 ///
 /// Anything not cargo-shaped returns `None` rather than a guess.
 fn build_dir(exe: &Path) -> Option<&Path> {
-    let deps = exe.parent()?;
-    if deps.file_name()? != "deps" {
-        return None;
-    }
-    // A relative `deps/x` leaves an empty parent, which would silently mean the
-    // working directory.
-    deps.parent().filter(|p| !p.as_os_str().is_empty())
+    let here = exe.parent()?;
+    // An empty path is what a relative `deps/x` leaves behind, and joining onto
+    // it would silently mean the working directory.
+    let candidates = [Some(here), here.parent()];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|dir| !dir.as_os_str().is_empty() && dir.join("deps").is_dir())
 }
 
 /// Write `rows` sorted by group then case, so the file diffs cleanly.
@@ -260,35 +267,31 @@ mod tests {
     }
 
     #[test]
-    fn the_build_directory_is_read_off_the_binarys_path() {
-        let of = |p: &str| build_dir(Path::new(p)).map(|d| d.to_string_lossy().into_owned());
-        // The profile directory, not the target directory above it: debug and
-        // release must not share a baseline file.
-        assert_eq!(
-            of("/w/target/release/deps/demo-1"),
-            Some("/w/target/release".into())
-        );
-        assert_eq!(
-            of("/w/target/debug/deps/demo-1"),
-            Some("/w/target/debug".into())
-        );
-        // A renamed target directory is found the same way.
-        assert_eq!(
-            of("/w/target.noindex/release/deps/demo-1"),
-            Some("/w/target.noindex/release".into())
-        );
-        // Cross-compiled builds keep their own, since the triple sits above the
-        // profile directory.
-        assert_eq!(
-            of("/w/t/aarch64-apple-darwin/release/deps/demo-1"),
-            Some("/w/t/aarch64-apple-darwin/release".into())
-        );
-        // Not a cargo layout: an installed or copied binary, and a bare name.
-        assert_eq!(of("/usr/local/bin/demo"), None);
-        assert_eq!(of("demo"), None);
-        // Relative, with nothing above `deps`: an empty parent would silently
-        // mean the working directory.
-        assert_eq!(of("deps/demo"), None);
+    fn the_build_directory_is_the_nearest_one_holding_deps() {
+        // The three places cargo puts a runnable binary, all within one level
+        // of the profile directory.
+        let root = std::env::temp_dir().join(format!("benchit-layout-{}", std::process::id()));
+        let build = root.join("target.noindex").join("release");
+        fs::create_dir_all(build.join("deps")).expect("mkdir");
+        fs::create_dir_all(build.join("examples")).expect("mkdir");
+        let of = |p: PathBuf| build_dir(&p).map(Path::to_path_buf);
+
+        // A bench or test binary. The profile directory, not the target
+        // directory above it: debug and release must not share a baseline.
+        assert_eq!(of(build.join("deps").join("demo-1")), Some(build.clone()));
+        // A `[[bin]]` under `cargo run`, which has no `deps` parent at all.
+        assert_eq!(of(build.join("probe")), Some(build.clone()));
+        // An example, one level down beside `deps`.
+        assert_eq!(of(build.join("examples").join("demo")), Some(build.clone()));
+
+        // Not a cargo layout: an installed binary, and a bare name.
+        assert_eq!(of(root.join("bin").join("demo")), None);
+        assert_eq!(of(PathBuf::from("demo")), None);
+        // A relative `deps/x` leaves an empty parent, which must not be read as
+        // the working directory.
+        assert_eq!(of(PathBuf::from("deps").join("demo")), None);
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

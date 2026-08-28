@@ -49,6 +49,11 @@ impl CaseResult {
     ///
     /// The unit is whatever the declaration counted; pair it with
     /// [`throughput`](Self::throughput) to know which.
+    ///
+    /// Computed from [`stats.min`](Stats::min), matching the printed column.
+    /// Derive it from `stats.p50` instead when the question is whether a budget
+    /// holds in practice rather than at best: something that fits only at its
+    /// best-case time does not fit.
     pub fn rate(&self) -> Option<f64> {
         let amount = self.throughput?.amount() as f64;
         if self.stats.min <= 0.0 {

@@ -131,7 +131,7 @@ for case in &result.cases {
 }
 ```
 
-Every case carries its `samples` in round order, its `stats` (`min`, `p50`, `p90`), its `ratio` against the group's reference, and its `baseline` if one was loaded. Round order is the part worth knowing: index `i` of one case was measured in the same round as index `i` of every other, so a derived metric can be paired the same way the ratio is. Print to stderr, as above, if the run might be asked for `--format=tsv`.
+Every case carries its `samples` in round order, its `stats` (`min`, `p50`, `p90`), its `ratio` against the group's reference, and its `baseline` if one was loaded. `rate()` and `delta()` are computed from `min`, matching the printed columns; reach for `stats.p50` instead when the question is whether a budget holds in practice rather than at best. Round order is the part worth knowing: index `i` of one case was measured in the same round as index `i` of every other, so a derived metric can be paired the same way the ratio is. Print to stderr, as above, if the run might be asked for `--format=tsv`.
 
 A group filtered out by the command line, or a run under `--list`, returns a result with no cases rather than nothing at all. Check for that if you gate on the numbers: "nothing was measured" and "nothing measured badly" are the same empty list, so a mistyped filter would otherwise turn a failing gate green.
 
@@ -139,7 +139,7 @@ A group filtered out by the command line, or a run under `--list`, returns a res
 
 `--save-baseline main` writes `benchit/main.tsv` into the directory cargo built the bench binary into; `--baseline main` loads it and adds a delta column against the saved minimum. The format is TSV, sorted by group then case, so it diffs cleanly in git and is readable without a tool.
 
-That directory is found from the binary's own path, so `build.target-dir` in `.cargo/config.toml`, a `--target-dir` flag, and a workspace all resolve correctly, and each build keeps its own baselines: a debug binary run straight out of `target/debug/deps/` cannot overwrite what `cargo bench` saved, and a `--target` build keeps a separate file. `CARGO_TARGET_DIR` is a fallback for layouts that are not cargo-shaped.
+That directory is found from the binary's own path — the nearest ancestor holding a `deps/` directory, which covers bench and test binaries, examples, and a `[[bin]]` run with `cargo run` — so `build.target-dir` in `.cargo/config.toml`, a `--target-dir` flag, and a workspace all resolve correctly. Each build keeps its own baselines: a debug run cannot overwrite what a release run saved, and a `--target` build keeps a separate file. `CARGO_TARGET_DIR` is a fallback for layouts that are not cargo-shaped, and a relative path in the "baseline saved to" line is the sign that no build directory was found.
 
 Saving merges: cases measured by this run replace their existing rows, and rows the run did not measure are carried across untouched. So saving from a filtered run updates just those cases instead of discarding every baseline the filter excluded.
 
