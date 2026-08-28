@@ -71,7 +71,13 @@ fn dir() -> PathBuf {
 /// otherwise share one, and a debug timing saved over a release baseline is
 /// worse than no baseline at all.
 ///
-/// Anything not cargo-shaped returns `None` rather than a guess.
+/// Anything not cargo-shaped returns `None` rather than a guess. So does
+/// `build.build-dir`, which moves `deps/` out to a separate tree and leaves
+/// only final artifacts here: the remaining signals for that layout are all
+/// name-based, and matching on `release`, `debug`, or an arbitrary profile name
+/// would claim directories that are not builds at all. An opt-in setting losing
+/// the per-profile split is the better trade, and the relative path in the
+/// "baseline saved to" line is what shows it happened.
 fn build_dir(exe: &Path) -> Option<&Path> {
     let here = exe.parent()?;
     // An empty path is what a relative `deps/x` leaves behind, and joining onto
