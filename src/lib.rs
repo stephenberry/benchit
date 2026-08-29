@@ -227,6 +227,7 @@ impl Bench {
             name: name.to_string(),
             bench: self,
             throughput: None,
+            no_reference: false,
             cases: Vec::new(),
         }
     }
@@ -306,6 +307,9 @@ pub struct Group<'b> {
     /// Applied to cases registered from here on, so a parameterized group can
     /// declare a different amount per size.
     throughput: Option<Throughput>,
+    /// Whether the cases are alternatives to one another; see
+    /// [`Group::no_reference`].
+    no_reference: bool,
     cases: Vec<Case<'b>>,
 }
 
@@ -329,6 +333,44 @@ impl<'b> Group<'b> {
         self
     }
 
+    /// Declare that the cases here are not alternatives to one another, so
+    /// none of them is the reference and nothing is compared.
+    ///
+    /// A ratio is a claim that two cases are two ways of doing one thing. A
+    /// group that holds unlike operations — an encode beside a decode, a read
+    /// beside a write — is a heading rather than a comparison, and a ratio
+    /// printed there relates two numbers that were never alternatives. This
+    /// drops the ratio column and its band, and leaves
+    /// [`CaseResult::ratio`] `None` and [`CaseResult::is_reference`] false on
+    /// every case, so the numbers handed back say what the report says.
+    ///
+    /// Unlike [`throughput`](Self::throughput), this applies to the whole
+    /// group however late it is called: a group either is a comparison or it
+    /// is not, and there is no honest report for one that is half of each.
+    ///
+    /// ```no_run
+    /// # use benchit::Bench;
+    /// # let mut bench = Bench::from_args();
+    /// let mut group = bench.group("codec/1MiB");
+    /// group.no_reference();
+    /// group.bench("encode", |b| b.iter(|| 1));
+    /// group.bench("decode", |b| b.iter(|| 2));
+    /// group.finish();
+    /// ```
+    ///
+    /// Splitting the group is usually the better answer: `codec/encode` and
+    /// `codec/decode` each compare within themselves and still read as a pair.
+    /// Reach for this when the split would cost what the group exists for — a
+    /// single declared amount in the header for cases that genuinely share it,
+    /// or one table for cases meant to be read side by side.
+    ///
+    /// The cases are still measured in one interleaved schedule. Interleaving
+    /// costs nothing here; the pairing it enables simply goes unused.
+    pub fn no_reference(&mut self) -> &mut Self {
+        self.no_reference = true;
+        self
+    }
+
     /// Register a case.
     ///
     /// `name` is anything [`Display`], so a parameterized name is just
@@ -337,7 +379,8 @@ impl<'b> Group<'b> {
     ///
     /// Ratios are relative to the first case registered (more precisely, the
     /// first that passes the filter), which is conventionally the reference
-    /// implementation.
+    /// implementation. A group of cases that are not alternatives should say
+    /// so with [`no_reference`](Self::no_reference).
     ///
     /// # Sharing a scratch buffer between cases
     ///
@@ -402,7 +445,7 @@ impl<'b> Group<'b> {
     /// Takes the cases out, which is also what leaves `Drop` nothing to do.
     fn run(&mut self) -> GroupResult {
         let mut cases = std::mem::take(&mut self.cases);
-        runner::run(self.bench, &self.name, &mut cases)
+        runner::run(self.bench, &self.name, &mut cases, self.no_reference)
     }
 }
 

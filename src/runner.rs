@@ -43,11 +43,17 @@ impl Plan<'_, '_> {
     }
 }
 
-pub(crate) fn run(bench: &mut Bench, group_name: &str, cases: &mut [Case<'_>]) -> GroupResult {
+pub(crate) fn run(
+    bench: &mut Bench,
+    group_name: &str,
+    cases: &mut [Case<'_>],
+    no_reference: bool,
+) -> GroupResult {
     // A group that measured nothing still returns a result; see `Group::finish`.
     let nothing = || GroupResult {
         name: group_name.to_string(),
         throughput: None,
+        no_reference,
         cases: Vec::new(),
     };
 
@@ -99,7 +105,7 @@ pub(crate) fn run(bench: &mut Bench, group_name: &str, cases: &mut [Case<'_>]) -
         measure_sequentially(&mut plans, floor_ns);
     }
 
-    let result = summarize(bench, group_name, plans);
+    let result = summarize(bench, group_name, plans, no_reference);
     if bench.config.save_baseline.is_some() {
         bench.record(&result);
     }
@@ -154,7 +160,12 @@ fn measure_sequentially(plans: &mut [Plan], floor_ns: f64) {
     }
 }
 
-fn summarize(bench: &Bench, group_name: &str, plans: Vec<Plan<'_, '_>>) -> GroupResult {
+fn summarize(
+    bench: &Bench,
+    group_name: &str,
+    plans: Vec<Plan<'_, '_>>,
+    no_reference: bool,
+) -> GroupResult {
     // The group header can only carry one amount, so it carries the declared
     // amount when every case agrees and nothing when they differ. A
     // parameterized group still gets a per-case rate column.
@@ -164,11 +175,18 @@ fn summarize(bench: &Bench, group_name: &str, plans: Vec<Plan<'_, '_>>) -> Group
     };
     // The reference is the first case that passed the filter, which is
     // conventionally the implementation the others are being compared against.
-    let reference: Vec<f64> = plans.first().map(|p| p.samples.clone()).unwrap_or_default();
-    let reference_min = plans
-        .first()
-        .map(|p| Stats::from_sorted(&stats::sorted_copy(&p.samples)).min)
-        .unwrap_or(f64::NAN);
+    // A group that declared it has none skips this: there is nothing to pair
+    // against, so its samples are not copied out either.
+    let (reference, reference_min) = if no_reference {
+        (Vec::new(), f64::NAN)
+    } else {
+        let samples: Vec<f64> = plans.first().map(|p| p.samples.clone()).unwrap_or_default();
+        let min = plans
+            .first()
+            .map(|p| Stats::from_sorted(&stats::sorted_copy(&p.samples)).min)
+            .unwrap_or(f64::NAN);
+        (samples, min)
+    };
 
     let cases = plans
         .into_iter()
@@ -179,7 +197,7 @@ fn summarize(bench: &Bench, group_name: &str, plans: Vec<Plan<'_, '_>>) -> Group
             // Pairing only means something when the samples were interleaved;
             // sequential samples share an index but nothing else, so those fall
             // back to a ratio of the two reported minima.
-            let ratio = (i > 0)
+            let ratio = (!no_reference && i > 0)
                 .then(|| {
                     bench
                         .config
@@ -197,7 +215,7 @@ fn summarize(bench: &Bench, group_name: &str, plans: Vec<Plan<'_, '_>>) -> Group
             let name = std::mem::take(&mut plan.case.name);
             CaseResult {
                 baseline: bench.saved_stats(&plan.full_name),
-                is_reference: i == 0,
+                is_reference: !no_reference && i == 0,
                 throughput: plan.case.throughput,
                 name,
                 iters: plan.iters,
@@ -211,6 +229,7 @@ fn summarize(bench: &Bench, group_name: &str, plans: Vec<Plan<'_, '_>>) -> Group
     GroupResult {
         name: group_name.to_string(),
         throughput,
+        no_reference,
         cases,
     }
 }
