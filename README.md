@@ -47,7 +47,7 @@ So a group is run in rounds: one sample of each case, then the next round. Round
 
 The reported ratio and the bracket after it are the median and interquartile range of those per-round paired ratios: a noise band that was measured rather than modelled, with no resampling and no distributional assumption. Both are order statistics of the same paired quantity, so the point always sits inside its own band. (A ratio of the two displayed minima would be a different estimator, and in practice lands outside the band a few percent of the time — the same size as the effects the tool exists to detect.) Under `--no-interleave` there is nothing to pair, so the ratio falls back to `min / min` and the bracket is omitted.
 
-The ratio is relative to the first case registered, which is itself a claim: that the cases are alternatives. A group that holds unlike operations can decline to make it, with [`no_reference()`](#groups-that-are-not-comparisons).
+The ratio is relative to the first case registered, which is itself a claim: that the cases are alternatives. A group that holds unlike operations, or that sweeps one operation across several sizes, can decline to make it, with [`no_reference()`](#groups-that-are-not-comparisons).
 
 **The minimum leads.** For deterministic CPU-bound code, measurement noise is one-sided: interrupts, preemption, frequency transitions, and cache pollution all add time and none subtract it. Under that model the minimum is the best estimator of true cost and the most sensitive detector of a real change. That assumption does not always hold, which is why p50 and p90 sit beside it and never replace it. A wide min-to-p90 spread is the signal that the workload itself is variable and the median is the number to read.
 
@@ -98,9 +98,11 @@ sort_unstable
 
 The group header carries the declared amount only when every case agrees on it; otherwise the per-case rate column is the whole story.
 
+A sweep is not a comparison, though. These cases are one operation at three sizes rather than three ways of doing one thing, so the `171x  [169 .. 176]` is a tight measurement of the fact that larger inputs take longer, and the rate column already carries the part that is not obvious: how per-element cost moves across the sweep. Add [`no_reference()`](#groups-that-are-not-comparisons) to drop it.
+
 ## Groups that are not comparisons
 
-A ratio says two cases are two ways of doing one thing. A group that holds unlike operations — an encode beside a decode, a read beside a write — is a heading rather than a comparison, and `no_reference()` drops the ratio column rather than relating two numbers that were never alternatives:
+A ratio says two cases are two ways of doing one thing. Two kinds of group are not that: one that holds unlike operations — an encode beside a decode, a read beside a write — and one that sweeps a parameter, where the cases are a single operation at a series of sizes. Both are headings rather than comparisons, and `no_reference()` drops the ratio column rather than relating two numbers that were never alternatives:
 
 ```rust
 let mut g = bench.group("codec/1MiB");
@@ -119,7 +121,9 @@ codec/1MiB  1.000 MiB
 
 The timings, the declared amount, and the rate column are untouched; only the comparison goes. Every case comes back with `ratio: None` and `is_reference: false`, so the `GroupResult` and `--format=tsv` say what the table says. Unlike `throughput`, the call applies to the whole group however late it is made: a group either is a comparison or it is not.
 
-Splitting is usually the better answer — `codec/encode` and `codec/decode` each compare within themselves and still read as a pair. Reach for `no_reference()` when the split would cost what the group was for: one declared amount in the header, or one table meant to be read side by side.
+For unlike operations, splitting is usually the better answer — `codec/encode` and `codec/decode` each compare within themselves and still read as a pair. Reach for `no_reference()` when the split would cost what the group was for: one declared amount in the header, or one table meant to be read side by side. A sweep has nowhere to split to, since a group of one case compares against nothing, so it is `no_reference()` or a ratio column nobody reads.
+
+A group crossing both — several implementations at several sizes — wants the size in the group name and the implementations as its cases, one group per size. Each group is then a comparison the ratio column can carry.
 
 ## Command line
 
@@ -156,15 +160,19 @@ for case in &result.cases {
 }
 ```
 
-Every case carries its `samples` in round order, its `stats` (`min`, `p50`, `p90`), its `ratio` against the group's reference (`None` throughout a `no_reference()` group), and its `baseline` if one was loaded. `rate()` and `delta()` are computed from `min`, matching the printed columns; reach for `stats.p50` instead when the question is whether a budget holds in practice rather than at best. Round order is the part worth knowing: index `i` of one case was measured in the same round as index `i` of every other, so a derived metric can be paired the same way the ratio is. Print to stderr, as above, if the run might be asked for `--format=tsv`.
+Every case carries its `samples` in round order, its `stats` (`min`, `p50`, `p90`), its `ratio` against the group's reference (`None` on the reference case itself and throughout a `no_reference()` group), and its `baseline` if one was loaded. `rate()` and `delta()` are computed from `min`, matching the printed columns; reach for `stats.p50` instead when the question is whether a budget holds in practice rather than at best. Round order is the part worth knowing: index `i` of one case was measured in the same round as index `i` of every other, so a derived metric can be paired the same way the ratio is. Print to stderr, as above, if the run might be asked for `--format=tsv`.
 
 A group filtered out by the command line, or a run under `--list`, returns a result with no cases rather than nothing at all. Check for that if you gate on the numbers: "nothing was measured" and "nothing measured badly" are the same empty list, so a mistyped filter would otherwise turn a failing gate green.
 
+A filter can also move the reference, which is the first case that passed it rather than the first registered. A filter narrow enough to select one case promotes it to reference, leaving its `ratio` as `None`. So a gate that unwraps a ratio fails on an ordinary filtered run, and fails looking like the regression it was written to catch. Read the ratio as the `Option` it is.
+
 ## Baselines
 
-`--save-baseline main` writes `benchit/main.tsv` into the directory cargo built the bench binary into; `--baseline main` loads it and adds a delta column against the saved minimum. The format is TSV, sorted by group then case, so it diffs cleanly in git and is readable without a tool.
+`--save-baseline main` writes `benchit/main.tsv` into the directory cargo built the bench binary into; `--baseline main` loads it and adds a delta column against the saved minimum. The format is TSV, sorted by group then case, so it is readable without a tool.
 
 That directory is found from the binary's own path — the nearest ancestor holding a `deps/` directory, which covers bench and test binaries, examples, and a `[[bin]]` run with `cargo run` — so `build.target-dir` in `.cargo/config.toml`, a `--target-dir` flag, and a workspace all resolve correctly. Each build keeps its own baselines: a debug run cannot overwrite what a release run saved, and a `--target` build keeps a separate file. `CARGO_TARGET_DIR` is a fallback for layouts that are not cargo-shaped, and a relative path in the "baseline saved to" line is the sign that no build directory was found.
+
+So baselines live with the build rather than with the source: `cargo clean` deletes them, and a fresh CI runner starts without any. `--baseline` takes a name rather than a path, so a baseline committed to the repository cannot be loaded back — comparing across machines is deliberately out of reach, since two runs on different hardware share none of the pairing that makes a within-run ratio worth trusting. For a regression gate that survives a fresh checkout, assert on a ratio measured inside one run rather than on a stored timing.
 
 Saving merges: cases measured by this run replace their existing rows, and rows the run did not measure are carried across untouched. So saving from a filtered run updates just those cases instead of discarding every baseline the filter excluded.
 
@@ -182,11 +190,14 @@ Cross-run comparison is inherently weaker than within-run pairing, because nothi
 | `criterion::black_box` | `std::hint::black_box` |
 | `group.finish()` | unchanged, or drop it and let scope end |
 | `b.iter(...)` | unchanged |
+| `b.iter_batched(setup, routine, _)` | `b.iter_with(setup, routine)` |
+| `b.iter_batched_ref(setup, routine, _)` | `b.iter_with(setup, routine)`, taking the value rather than `&mut` |
+| `BatchSize::*` | delete the argument; the batch size is calibrated |
 | `group.throughput(Throughput::Bytes(n))` | unchanged |
 
 The positional filter is a substring match on `group/case`, as in criterion, so existing muscle memory and CI invocations transfer unchanged.
 
-Expect one number to move on the way across: any benchmark that allocates inside its timed closure will get faster when converted to `iter_with`, because it stops counting a deallocation it was never meant to measure. That is a correction, not a regression.
+Expect one number to move on the way across: a benchmark that allocates inside a timed `iter` closure will get faster when converted to `iter_with`, because it stops counting a deallocation it was never meant to measure. That is a correction, not a regression. Nothing moves for `iter_batched`, which already excluded the drop of its result.
 
 One thing does not transfer. Cases are registered, not run: an interleaved schedule cannot exist until the group has seen all of them, so every closure in a group is live at once. Two cases that each capture `&mut scratch` will not compile. Share it through a `RefCell` and borrow outside the `iter` call, or give each case its own.
 
