@@ -31,11 +31,15 @@ pub struct CaseResult {
     /// iteration.
     pub stats: Stats,
     /// The group's reference case: the first one that passed the filter.
+    ///
+    /// False on every case of a group that declared
+    /// [`no_reference`](crate::Group::no_reference), which has none.
     pub is_reference: bool,
     /// This case's cost relative to the reference case.
     ///
-    /// `None` for the reference case, and for a case whose ratio could not be
-    /// computed because the reference measured as zero.
+    /// `None` for the reference case, for a case whose ratio could not be
+    /// computed because the reference measured as zero, and for every case of a
+    /// group that declared [`no_reference`](crate::Group::no_reference).
     pub ratio: Option<Ratio>,
     /// What `--baseline` had recorded for this case, if anything.
     pub baseline: Option<Stats>,
@@ -98,6 +102,10 @@ pub struct GroupResult {
     /// formatting detail rather than a result: per-case amounts are on
     /// [`CaseResult::throughput`].
     pub(crate) throughput: Option<Throughput>,
+    /// Set by [`Group::no_reference`](crate::Group::no_reference), and a
+    /// formatting detail for the same reason: the cases already carry no ratio,
+    /// this is what also removes the column they would have sat in.
+    pub(crate) no_reference: bool,
 }
 
 /// Where results go.
@@ -259,7 +267,11 @@ impl Reporter for TextReporter {
     }
 
     fn group(&mut self, group: &GroupResult) {
-        let cells: Vec<Cells> = group.cases.iter().map(Cells::new).collect();
+        let cells: Vec<Cells> = group
+            .cases
+            .iter()
+            .map(|c| Cells::new(c, group.no_reference))
+            .collect();
         let w = Widths::of(&cells);
 
         // The declared amount, right-aligned over the min column.
@@ -325,7 +337,7 @@ struct Cells {
 }
 
 impl Cells {
-    fn new(c: &CaseResult) -> Self {
+    fn new(c: &CaseResult, no_reference: bool) -> Self {
         Self {
             name: c.name.clone(),
             min: time(c.stats.min),
@@ -336,12 +348,19 @@ impl Cells {
                 .zip(c.throughput)
                 .map(|(v, t)| rate(v, t))
                 .unwrap_or_default(),
-            ratio: match (&c.ratio, c.is_reference) {
-                (Some(r), _) => ratio(r.point),
-                (None, true) => "1.00x".to_string(),
-                // The reference measured as zero, so there is no ratio to
-                // report. Saying "1.00x" here would be a lie.
-                (None, false) => "-".to_string(),
+            // A group with no reference has nothing to compare, so the cell is
+            // empty rather than a dash: an empty cell is what collapses the
+            // column in `Widths`, and a dash would read as a failed ratio.
+            ratio: if no_reference {
+                String::new()
+            } else {
+                match (&c.ratio, c.is_reference) {
+                    (Some(r), _) => ratio(r.point),
+                    (None, true) => "1.00x".to_string(),
+                    // The reference measured as zero, so there is no ratio to
+                    // report. Saying "1.00x" here would be a lie.
+                    (None, false) => "-".to_string(),
+                }
             },
             band: match c.ratio.and_then(|r| r.iqr) {
                 Some((lo, hi)) => format!("[{} .. {}]", sig(lo, 3), sig(hi, 3)),

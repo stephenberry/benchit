@@ -517,3 +517,79 @@ fn finish_does_not_run_the_schedule_twice() {
     let rows = report.lines().filter(|l| l.starts_with("g\t")).count();
     assert_eq!(rows, 1, "the group was reported twice:\n{report}");
 }
+
+#[test]
+fn a_group_without_a_reference_prints_no_ratio_column() {
+    let capture = Capture::default();
+    let result = {
+        let mut bench = Bench::with_config(fast(Format::Text)).report_to(Box::new(capture.clone()));
+        let mut g = bench.group("codec");
+        g.no_reference();
+        g.bench("encode", |b| b.iter(|| work(std::hint::black_box(100))));
+        g.bench("decode", |b| b.iter(|| work(std::hint::black_box(400))));
+        g.finish()
+    };
+    let report = capture.text();
+
+    // The timings are the reason the group exists, so they all stay.
+    assert!(report.contains("encode"), "{report}");
+    assert!(report.contains("decode"), "{report}");
+    assert!(report.contains("p50"), "{report}");
+    assert!(
+        !report.contains('x'),
+        "cases that are not alternatives must not be compared:\n{report}"
+    );
+    assert!(!report.contains('['), "no ratio means no band:\n{report}");
+
+    // And the result says what the report says, rather than carrying a
+    // comparison the printed table declined to make.
+    for case in &result.cases {
+        assert_eq!(case.ratio, None, "{} carries a ratio", case.name);
+        assert!(!case.is_reference, "{} is a reference", case.name);
+    }
+}
+
+#[test]
+fn a_group_without_a_reference_leaves_the_tsv_ratio_columns_empty() {
+    let capture = Capture::default();
+    {
+        let mut bench = Bench::with_config(fast(Format::Tsv)).report_to(Box::new(capture.clone()));
+        let mut g = bench.group("codec");
+        g.no_reference();
+        g.bench("encode", |b| b.iter(|| work(std::hint::black_box(100))));
+        g.bench("decode", |b| b.iter(|| work(std::hint::black_box(400))));
+        g.finish();
+    }
+    let report = capture.text();
+
+    let mut lines = report.lines();
+    assert!(lines.next().expect("comment").starts_with("# benchit"));
+    let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
+    let ratio_columns = ["ratio", "ratio_lo", "ratio_hi"].map(|name| {
+        header
+            .iter()
+            .position(|h| *h == name)
+            .unwrap_or_else(|| panic!("no {name} column in: {header:?}"))
+    });
+    let min_ns = header
+        .iter()
+        .position(|h| *h == "min_ns")
+        .expect("a min_ns column");
+
+    let rows: Vec<Vec<&str>> = lines.map(|l| l.split('\t').collect()).collect();
+    assert_eq!(rows.len(), 2, "{report}");
+    for row in &rows {
+        assert_eq!(row.len(), header.len(), "row width must match the header");
+        assert!(
+            !row[min_ns].is_empty(),
+            "the timings still print:\n{report}"
+        );
+        for column in ratio_columns {
+            assert_eq!(
+                row[column], "",
+                "{} must report no ratio:\n{report}",
+                row[1]
+            );
+        }
+    }
+}
