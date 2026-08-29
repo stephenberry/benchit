@@ -47,7 +47,7 @@ So a group is run in rounds: one sample of each case, then the next round. Round
 
 The reported ratio and the bracket after it are the median and interquartile range of those per-round paired ratios: a noise band that was measured rather than modelled, with no resampling and no distributional assumption. Both are order statistics of the same paired quantity, so the point always sits inside its own band. (A ratio of the two displayed minima would be a different estimator, and in practice lands outside the band a few percent of the time — the same size as the effects the tool exists to detect.) Under `--no-interleave` there is nothing to pair, so the ratio falls back to `min / min` and the bracket is omitted.
 
-The ratio is relative to the first case registered, which is a claim that the cases are alternatives. When a group is a heading rather than a comparison — an encode beside a decode — `group.no_reference()` drops the ratio column and its band instead of relating two numbers that were never alternatives. Splitting into `codec/encode` and `codec/decode` is usually the better answer; reach for `no_reference()` when the split would cost what the group was for, such as one declared amount in the header or one table meant to be read side by side.
+The ratio is relative to the first case registered, which is itself a claim: that the cases are alternatives. A group that holds unlike operations can decline to make it, with [`no_reference()`](#groups-that-are-not-comparisons).
 
 **The minimum leads.** For deterministic CPU-bound code, measurement noise is one-sided: interrupts, preemption, frequency transitions, and cache pollution all add time and none subtract it. Under that model the minimum is the best estimator of true cost and the most sensitive detector of a real change. That assumption does not always hold, which is why p50 and p90 sit beside it and never replace it. A wide min-to-p90 spread is the signal that the workload itself is variable and the median is the number to read.
 
@@ -97,6 +97,29 @@ sort_unstable
 ```
 
 The group header carries the declared amount only when every case agrees on it; otherwise the per-case rate column is the whole story.
+
+## Groups that are not comparisons
+
+A ratio says two cases are two ways of doing one thing. A group that holds unlike operations — an encode beside a decode, a read beside a write — is a heading rather than a comparison, and `no_reference()` drops the ratio column rather than relating two numbers that were never alternatives:
+
+```rust
+let mut g = bench.group("codec/1MiB");
+g.throughput(Throughput::Bytes(input.len() as u64));
+g.no_reference();
+g.bench("encode", |b| b.iter(|| mycrate::encode(black_box(&value))));
+g.bench("decode", |b| b.iter(|| mycrate::decode(black_box(&input))));
+g.finish();
+```
+
+```
+codec/1MiB  1.000 MiB
+  encode  412.3 us   p50 418.9 us   p90 431.2 us   2.369 GiB/s
+  decode  198.7 us   p50 203.4 us   p90 211.8 us   4.915 GiB/s
+```
+
+The timings, the declared amount, and the rate column are untouched; only the comparison goes. Every case comes back with `ratio: None` and `is_reference: false`, so the `GroupResult` and `--format=tsv` say what the table says. Unlike `throughput`, the call applies to the whole group however late it is made: a group either is a comparison or it is not.
+
+Splitting is usually the better answer — `codec/encode` and `codec/decode` each compare within themselves and still read as a pair. Reach for `no_reference()` when the split would cost what the group was for: one declared amount in the header, or one table meant to be read side by side.
 
 ## Command line
 
